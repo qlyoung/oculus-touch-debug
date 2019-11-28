@@ -1,19 +1,53 @@
-// dllmain.cpp : Defines the entry point for the DLL application.
+/*
+ * DLL to hook ovr_GetInputState and display a graphical view of controller
+ * input state.
+ */
 #include "stdafx.h"
 
+#include <stdio.h>
+#include <Shlwapi.h>
 #include "MinHook.h"
 #include "Include/OVR_CAPI.h"
-#include <stdio.h>
-#include "Include\CImg.h"
+#include "Include/CImg.h"
 
-ovrResult (*gis)(ovrSession session, ovrControllerType controllerType,
-		 ovrInputState *inputState) = NULL;
-bool enabled = false;
+#define LOGFILE "controller_overlay_log.txt"
 
 using namespace cimg_library;
 
+/* Debug display */
 CImgDisplay disp;
 
+void hookGetInputState(void);
+
+/* Whether ovr_GetInputState hook is enabled */
+bool hook_gis_enabled = false;
+/* Whether LoadLibrary hook is enabled */
+bool hook_ll_enabled = false;
+
+/* ovr_GetInputState actual fp */
+ovrResult (*gis)(ovrSession session, ovrControllerType controllerType,
+		 ovrInputState *inputState) = NULL;
+
+/* LoadLibrary actual fp*/
+HMODULE(WINAPI *TrueLoadLibrary)(LPCWSTR lpFileName);
+
+HMODULE WINAPI HookLoadLibrary(LPCWSTR lpFileName)
+{
+	LPCWSTR name = PathFindFileNameW(lpFileName);
+	LPCWSTR ext = PathFindExtensionW(name);
+	size_t length = ext - name;
+
+	/* Call actual version */
+	HMODULE ret = TrueLoadLibrary(lpFileName);
+
+	/* If OVRRT is now loaded lets go hook it */
+	if (wcsncmp(name, L"LibOVRRT64_1.dll", length) == 0)
+		hookGetInputState();
+
+	return ret;
+}
+
+/* ovr_GetInputState hook */
 ovrResult mygis(ovrSession session, ovrControllerType controllerType,
 		ovrInputState *inputState)
 {
@@ -94,10 +128,7 @@ ovrResult mygis(ovrSession session, ovrControllerType controllerType,
 	return r;
 }
 
-#define LOGFILE "controller_overlay_log.txt"
-
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call,
-		      LPVOID lpReserved)
+void hookGetInputState()
 {
 	int ret = true;
 	int mhr;
@@ -105,55 +136,90 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call,
 	FARPROC p;
 	FILE *fp = nullptr;
 
+	fp = fopen(LOGFILE, "a");
+
+	h = GetModuleHandleA("LibOVRRT64_1.dll");
+	if (!h) {
+		fprintf(fp, "Couldn't get OVRRT handle\n");
+		ret = false;
+		goto done;
+	}
+
+	p = GetProcAddress(h, "ovr_GetInputState");
+	if (!p) {
+		fprintf(fp, "Couldn't find ovr_GetInputState");
+		ret = false;
+		goto done;
+	}
+
+	if (!gis
+	    && (mhr = MH_CreateHook(p, mygis, reinterpret_cast<LPVOID *>(&gis)))
+		       != MH_OK) {
+		fprintf(fp, "Couldn't create hook: %d\n", mhr);
+		ret = false;
+		goto done;
+	}
+	if (!hook_gis_enabled && (mhr = MH_EnableHook(p)) != MH_OK) {
+		fprintf(fp, "MH_EnableHook failed\n");
+		ret = false;
+		goto done;
+	} else
+		hook_gis_enabled = true;
+
+done:
+	if (fp)
+		fclose(fp);
+}
+
+bool installLoadLibraryHook()
+{
+	if (MH_CreateHook(&LoadLibraryW, &HookLoadLibrary,
+			  reinterpret_cast<LPVOID *>(&TrueLoadLibrary))
+	    != MH_OK)
+		return false;
+
+	if (MH_EnableHook(&LoadLibraryW) != MH_OK)
+		return false;
+
+	return true;
+}
+
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call,
+		      LPVOID lpReserved)
+{
+	FILE *fp = nullptr;
+	HANDLE h;
+
 	switch (ul_reason_for_call) {
 	case DLL_PROCESS_ATTACH:
 		fp = fopen(LOGFILE, "w");
 
 		if (MH_Initialize() != MH_OK) {
 			fprintf(fp, "MH_Initialize() failed\n");
-			ret = false;
-			goto done;
+			fclose(fp);
+			return false;
 		}
-	case DLL_THREAD_ATTACH:
-		if (!fp)
-			fp = fopen(LOGFILE, "a");
 
 		h = GetModuleHandleA("LibOVRRT64_1.dll");
-		if (!h) {
-			fprintf(fp, "Couldn't get OVRRT handle\n");
-			ret = false;
-			goto done;
+
+		/* If not loaded yet, hook LoadLibrary */
+		if (!h && !installLoadLibraryHook()) {
+			fprintf(fp, "Couldn't hook LoadLibraryW");
+			fclose(fp);
+			return false;
+		} else {
+			/* If loaded, hook ovr_GetInputState */
+			hookGetInputState();
 		}
 
-		p = GetProcAddress(h, "ovr_GetInputState");
-		if (!p) {
-			fprintf(fp, "Couldn't find ovr_GetInputState");
-			ret = false;
-			goto done;
-		}
-
-		if (!gis
-		    && (mhr = MH_CreateHook(p, mygis,
-					    reinterpret_cast<LPVOID *>(&gis)))
-			       != MH_OK) {
-			fprintf(fp, "Couldn't create hook: %d\n", mhr);
-			ret = false;
-			goto done;
-		}
-		if (!enabled && MH_EnableHook(p) != MH_OK) {
-			fprintf(fp, "MH_EnableHook failed\n");
-			ret = false;
-			goto done;
-		}
+		fclose(fp);
+	case DLL_THREAD_ATTACH:
 		break;
 	case DLL_THREAD_DETACH:
 	case DLL_PROCESS_DETACH:
 		break;
 	}
 
-done:
-	if (fp)
-		fclose(fp);
-
-	return ret;
+	return TRUE;
 }
