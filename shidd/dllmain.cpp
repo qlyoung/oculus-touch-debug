@@ -117,18 +117,41 @@ ovrResult hook_ovr_GetInputState(ovrSession session,
 				topbuttonletter = "B";
 				bottombuttonletter = "A";
 			}
-			buttons[i] = CImg<unsigned char>(2.5 * bar, 4.5 * bar,
-							 1, 3, 1);
+			buttons[i] = CImg<unsigned char>(2.5 * bar, 8 * bar, 1,
+							 3, 1);
 			color = inputState->Buttons & topbutton ? red : blue;
 			buttons[i].draw_circle(bar, bar, bar, color, 1.0);
-			buttons[i].draw_text(bar, bar, topbuttonletter, 0,
-					     color, 1, fontsize);
+			buttons[i].draw_text(bar - 0.2 * bar, bar - 0.2 * bar,
+					     topbuttonletter, white, 0, 1,
+					     config.fontsize);
 			color = inputState->Buttons & bottombutton ? red : blue;
 			buttons[i].draw_circle(bar, 3 * bar + 0.1 * bar, bar,
 					       color, 1.0);
-			buttons[i].draw_text(bar, 3 * bar + 0.1 * bar,
-					     bottombuttonletter, 0, color, 1,
-					     fontsize);
+			buttons[i].draw_text(bar - 0.2 * bar,
+					     3 * bar + 0.1 * bar - 0.2 * bar,
+					     bottombuttonletter, white, 0, 1,
+					     config.fontsize);
+
+			buttons[i].draw_rectangle(
+				0, 4.3 * bar + 0.3 * bar, 2 * bar,
+				4.3 * bar + 0.3 * bar + bar, blue, 1.0);
+			buttons[i].draw_rectangle(
+				0, 4.3 * bar + 0.3 * bar, 2 * bar,
+				4.3 * bar + 0.3 * bar + bar, red,
+				inputState->IndexTrigger[i]);
+			buttons[i].draw_text(
+				0.2 * bar, 4.3 * bar + 0.3 * bar + 0.1 * bar,
+				"Trigger", white, 0, 1.0, config.fontsize - 7);
+			buttons[i].draw_rectangle(
+				0, 6.2 * bar + 0.3 * bar, 2 * bar,
+				6.2 * bar + 0.3 * bar + bar, blue, 1.0);
+			buttons[i].draw_rectangle(
+				0, 6.2 * bar + 0.3 * bar, 2 * bar,
+				6.2 * bar + 0.3 * bar + bar, red,
+				inputState->HandTrigger[i]);
+			buttons[i].draw_text(
+				0.2 * bar, 6.2 * bar + 0.3 * bar + 0.1 * bar,
+				"Grip", white, 0, 1.0, config.fontsize);
 		}
 
 		CImgList<unsigned char> list(thumbsticks[0], buttons[0],
