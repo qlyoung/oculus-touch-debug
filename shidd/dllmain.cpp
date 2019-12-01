@@ -6,91 +6,103 @@
 
 #include <stdio.h>
 #include <Shlwapi.h>
+#include <assert.h>
 #include "MinHook.h"
 #include "Include/OVR_CAPI.h"
 #include "Include/CImg.h"
 
 #define LOGFILE "controller_overlay_log.txt"
+#if _WIN64
+#define OVRMODNAME "LibOVRRT64_1.dll"
+#else
+#define OVRMODNAME "LibOVRRT32_1.dll"
+#endif
+
+static struct {
+	int resx;
+	int resy;
+	int fontsize;
+} config = {800, 200, 20};
 
 using namespace cimg_library;
-
-/* Debug display */
 CImgDisplay disp;
 
-void hookGetInputState(void);
+void installhook_ovr_GetInputState(void);
 
-/* Whether ovr_GetInputState hook is enabled */
-bool hook_gis_enabled = false;
-/* Whether LoadLibrary hook is enabled */
-bool hook_ll_enabled = false;
+/* Original function pointers */
+ovrResult (*_ovr_GetInputState)(ovrSession session,
+				ovrControllerType controllerType,
+				ovrInputState *inputState) = NULL;
+HMODULE(WINAPI *_LoadLibraryW)(LPCWSTR lpFileName);
 
-/* ovr_GetInputState actual fp */
-ovrResult (*gis)(ovrSession session, ovrControllerType controllerType,
-		 ovrInputState *inputState) = NULL;
-
-/* LoadLibrary actual fp*/
-HMODULE(WINAPI *TrueLoadLibrary)(LPCWSTR lpFileName);
-
-HMODULE WINAPI HookLoadLibrary(LPCWSTR lpFileName)
+/* Hooks */
+static bool hook_LoadLibraryW_enabled;
+HMODULE WINAPI hook_LoadLibraryW(LPCWSTR lpFileName)
 {
 	LPCWSTR name = PathFindFileNameW(lpFileName);
 	LPCWSTR ext = PathFindExtensionW(name);
 	size_t length = ext - name;
 
 	/* Call actual version */
-	HMODULE ret = TrueLoadLibrary(lpFileName);
+	HMODULE ret = _LoadLibraryW(lpFileName);
 
 	/* If OVRRT is now loaded lets go hook it */
-	if (wcsncmp(name, L"LibOVRRT64_1.dll", length) == 0)
-		hookGetInputState();
+	if (wcsncmp(name, L"" OVRMODNAME, length) == 0)
+		installhook_ovr_GetInputState();
 
 	return ret;
 }
 
-/* ovr_GetInputState hook */
-ovrResult mygis(ovrSession session, ovrControllerType controllerType,
-		ovrInputState *inputState)
+static bool hook_ovr_GetInputState_enabled;
+ovrResult hook_ovr_GetInputState(ovrSession session,
+				 ovrControllerType controllerType,
+				 ovrInputState *inputState)
 {
-	ovrResult r = gis(session, controllerType, inputState);
+	ovrResult r = _ovr_GetInputState(session, controllerType, inputState);
 
 	if (controllerType == ovrControllerType_Touch) {
-		static int resx = 800;
-		static int resy = 200;
-
 		static const unsigned char red[] = {255, 0, 0};
 		static const unsigned char green[] = {0, 255, 0};
 		static const unsigned char blue[] = {0, 0, 255};
-		static const int fontsize = 18;
+		static const unsigned char white[] = {255, 255, 255};
 
-		CImg<unsigned char> thumbsticks[2];
-		CImg<unsigned char> buttons[2];
-		CImg<unsigned char> triggers[2];
-		CImg<unsigned char> composite(resx, resy);
+		CImg<unsigned char> thumbsticks[ovrHand_Count];
+		CImg<unsigned char> buttons[ovrHand_Count];
 
 		const unsigned char *color;
 
-		for (int i = 0; i < 2; i++) {
+		for (int i = 0; i < ovrHand_Count; i++) {
 
 			/* Thumbstick */
-			float tsr = 0.5 * resy;
+			float tsr = 0.5 * min(config.resx, config.resy);
 			float tspr = 0.1 * tsr;
 			float tsresx = 2.5 * tsr;
 			float tsresy = 2.5 * tsr;
 			int bm = (i == ovrHand_Left) ? ovrButton_LThumb
 						     : ovrButton_RThumb;
+#if 0
+			FILE *fp = fopen("render_" LOGFILE, "a");
+
+			fprintf(fp,
+			       "[%d] tsr: %f \t tspr %f \t tsresx %f \t "
+			       "tsresy %f\n",
+			       i, tsr, tspr, tsresx, tsresy);
+
+			fclose(fp);
+#endif
 			color = (inputState->Buttons & bm) ? green : red;
 			thumbsticks[i] =
 				CImg<unsigned char>(tsresx, tsresy, 1, 3, 1);
-			thumbsticks[i].draw_circle(tsresx / 2.0, tsresy / 2.0,
+			thumbsticks[i].draw_circle(0.5 * tsresx, 0.5 * tsresy,
 						   tsr, blue, 1);
 			thumbsticks[i].draw_circle(
-				tsresx / 2.0
+				0.5 * tsresx
 					+ tsr * inputState->Thumbstick[i].x,
-				tsresx / 2.0
+				0.5 * tsresx
 					+ tsr * -inputState->Thumbstick[i].y,
 				tspr, color, 1);
 
-			/* Buttons */
+			/* Buttons & triggers */
 			float bar = 0.25 * tsr;
 			int topbutton, bottombutton;
 			const char *topbuttonletter, *bottombuttonletter;
@@ -128,7 +140,7 @@ ovrResult mygis(ovrSession session, ovrControllerType controllerType,
 	return r;
 }
 
-void hookGetInputState()
+void installhook_ovr_GetInputState()
 {
 	int ret = true;
 	int mhr;
@@ -138,9 +150,9 @@ void hookGetInputState()
 
 	fp = fopen(LOGFILE, "a");
 
-	h = GetModuleHandleA("LibOVRRT64_1.dll");
+	h = GetModuleHandleA(OVRMODNAME);
 	if (!h) {
-		fprintf(fp, "Couldn't get OVRRT handle\n");
+		fprintf(fp, "Couldn't get " OVRMODNAME " handle\n");
 		ret = false;
 		goto done;
 	}
@@ -152,29 +164,32 @@ void hookGetInputState()
 		goto done;
 	}
 
-	if (!gis
-	    && (mhr = MH_CreateHook(p, mygis, reinterpret_cast<LPVOID *>(&gis)))
+	if (!_ovr_GetInputState
+	    && (mhr = MH_CreateHook(
+			p, hook_ovr_GetInputState,
+			reinterpret_cast<LPVOID *>(&_ovr_GetInputState)))
 		       != MH_OK) {
 		fprintf(fp, "Couldn't create hook: %d\n", mhr);
 		ret = false;
 		goto done;
 	}
-	if (!hook_gis_enabled && (mhr = MH_EnableHook(p)) != MH_OK) {
+	if (!hook_ovr_GetInputState_enabled
+	    && (mhr = MH_EnableHook(p)) != MH_OK) {
 		fprintf(fp, "MH_EnableHook failed\n");
 		ret = false;
 		goto done;
 	} else
-		hook_gis_enabled = true;
+		hook_ovr_GetInputState_enabled = true;
 
 done:
 	if (fp)
 		fclose(fp);
 }
 
-bool installLoadLibraryHook()
+bool installhook_LoadLibraryW()
 {
-	if (MH_CreateHook(&LoadLibraryW, &HookLoadLibrary,
-			  reinterpret_cast<LPVOID *>(&TrueLoadLibrary))
+	if (MH_CreateHook(&LoadLibraryW, &hook_LoadLibraryW,
+			  reinterpret_cast<LPVOID *>(&_LoadLibraryW))
 	    != MH_OK)
 		return false;
 
@@ -190,6 +205,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call,
 {
 	FILE *fp = nullptr;
 	HANDLE h;
+	BOOL ret = TRUE;
 
 	switch (ul_reason_for_call) {
 	case DLL_PROCESS_ATTACH:
@@ -197,29 +213,33 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call,
 
 		if (MH_Initialize() != MH_OK) {
 			fprintf(fp, "MH_Initialize() failed\n");
-			fclose(fp);
-			return false;
+			ret = false;
+			goto done;
 		}
 
-		h = GetModuleHandleA("LibOVRRT64_1.dll");
+		h = GetModuleHandleA(OVRMODNAME);
 
-		/* If not loaded yet, hook LoadLibrary */
-		if (!h && !installLoadLibraryHook()) {
+		/* If not loaded yet, hook LoadLibraryW */
+		if (!h && !installhook_LoadLibraryW()) {
 			fprintf(fp, "Couldn't hook LoadLibraryW");
-			fclose(fp);
-			return false;
+			ret = false;
+			goto done;
 		} else {
 			/* If loaded, hook ovr_GetInputState */
-			hookGetInputState();
+			installhook_ovr_GetInputState();
 		}
-
-		fclose(fp);
 	case DLL_THREAD_ATTACH:
 		break;
-	case DLL_THREAD_DETACH:
 	case DLL_PROCESS_DETACH:
+		disp.close();
+		disp.~CImgDisplay();
+	case DLL_THREAD_DETACH:
 		break;
 	}
 
-	return TRUE;
+done:
+	if (fp)
+		fclose(fp);
+
+	return ret;
 }
